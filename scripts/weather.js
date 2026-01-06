@@ -4,8 +4,11 @@ class WeatherWidget {
     this.container = document.getElementById(containerId);
     this.options = {
       refreshInterval: 600000, // 10 minutes
-      units: 'metric', // 'metric' or 'imperial'
+      units: this.getStoredPreference('units') || 'metric', // Load saved preference
       showForecast: true,
+      showHourly: true,
+      forecastDays: 7,
+      cacheTimeout: 300000, // 5 minutes
       ...options
     };
     
@@ -15,6 +18,8 @@ class WeatherWidget {
     }
     
     this.locationName = null;
+    this.cache = new Map();
+    this.isLoading = false;
     this.init();
   }
 
@@ -22,12 +27,49 @@ class WeatherWidget {
     try {
       this.showLoading();
       await this.getUserLocation();
-      await this.fetchWeather();
+      await this.fetchWeatherData();
       this.setupAutoRefresh();
+      this.setupAccessibility();
     } catch (error) {
       this.showError('Failed to load weather data');
       console.error('Weather widget initialization error:', error);
     }
+  }
+
+  getStoredPreference(key) {
+    try {
+      return localStorage.getItem(`weather-widget-${key}`);
+    } catch (error) {
+      console.warn('localStorage not available:', error);
+      return null;
+    }
+  }
+
+  setStoredPreference(key, value) {
+    try {
+      localStorage.setItem(`weather-widget-${key}`, value);
+    } catch (error) {
+      console.warn('localStorage not available:', error);
+    }
+  }
+
+  getCacheKey(lat, lon) {
+    return `weather-${lat.toFixed(4)}-${lon.toFixed(4)}`;
+  }
+
+  getCachedData(key) {
+    const cached = this.cache.get(key);
+    if (cached && Date.now() - cached.timestamp < this.options.cacheTimeout) {
+      return cached.data;
+    }
+    return null;
+  }
+
+  setCachedData(key, data) {
+    this.cache.set(key, {
+      data: data,
+      timestamp: Date.now()
+    });
   }
 
   showLoading() {
@@ -97,16 +139,31 @@ class WeatherWidget {
     }
   }
 
-  async fetchWeather() {
+  async fetchWeatherData() {
+    if (this.isLoading) return; // Prevent multiple concurrent requests
+    
     try {
+      this.isLoading = true;
+      
+      // Check cache first
+      const cacheKey = this.getCacheKey(this.latitude, this.longitude);
+      const cachedData = this.getCachedData(cacheKey);
+      
+      if (cachedData) {
+        console.log('Using cached weather data');
+        this.displayWeather(cachedData);
+        return;
+      }
+
       const baseUrl = 'https://api.open-meteo.com/v1/forecast';
       const params = new URLSearchParams({
         latitude: this.latitude,
         longitude: this.longitude,
-        current: 'temperature_2m,relative_humidity_2m,wind_speed_10m,weather_code,apparent_temperature,precipitation',
-        daily: 'temperature_2m_max,temperature_2m_min,weather_code,precipitation_sum',
+        current: 'temperature_2m,relative_humidity_2m,wind_speed_10m,weather_code,apparent_temperature,precipitation,uv_index',
+        hourly: 'temperature_2m,weather_code,precipitation_probability',
+        daily: 'temperature_2m_max,temperature_2m_min,weather_code,precipitation_sum,uv_index_max,wind_speed_10m_max',
         timezone: 'auto',
-        forecast_days: 3
+        forecast_days: this.options.forecastDays
       });
       
       const url = `${baseUrl}?${params}`;
@@ -117,25 +174,36 @@ class WeatherWidget {
       }
       
       const data = await response.json();
+      
+      // Cache the data
+      this.setCachedData(cacheKey, data);
+      
       this.displayWeather(data);
       
     } catch (error) {
       console.error('Failed to fetch weather:', error);
       this.showError('Unable to load weather data. Please check your connection.');
+    } finally {
+      this.isLoading = false;
     }
   }
 
   displayWeather(data) {
-    const { current, daily } = data;
+    const { current, daily, hourly } = data;
+    
+    // Check for weather alerts
+    const alertsHTML = this.checkWeatherAlerts(current, daily);
     
     // Create weather content HTML
     const weatherContent = `
-      <div class="weather-content loaded">
+      <div class="weather-content loaded" role="main" aria-label="Weather information">
+        ${alertsHTML}
+        
         <div class="weather-header">
           <div class="weather-main">
-            <div class="weather-icon">${this.getWeatherIcon(current.weather_code)}</div>
+            <div class="weather-icon" role="img" aria-label="${this.getWeatherDescription(current.weather_code)}">${this.getWeatherIcon(current.weather_code)}</div>
             <div class="weather-temp-section">
-              <div class="weather-temp">${this.formatTemperature(current.temperature_2m)}</div>
+              <div class="weather-temp" aria-label="Current temperature">${this.formatTemperature(current.temperature_2m)}</div>
               <div class="feels-like">Feels like ${this.formatTemperature(current.apparent_temperature)}</div>
             </div>
           </div>
@@ -143,35 +211,66 @@ class WeatherWidget {
           ${this.locationName ? `<div class="weather-location">📍 ${this.locationName}</div>` : ''}
         </div>
         
-        <div class="weather-details">
+        <div class="weather-details" role="group" aria-label="Weather details">
           <div class="weather-detail">
-            <div class="weather-detail-icon">💧</div>
+            <div class="weather-detail-icon" aria-hidden="true">💧</div>
             <div class="weather-detail-label">Humidity</div>
             <div class="weather-detail-value">${current.relative_humidity_2m}%</div>
           </div>
           <div class="weather-detail">
-            <div class="weather-detail-icon">💨</div>
+            <div class="weather-detail-icon" aria-hidden="true">💨</div>
             <div class="weather-detail-label">Wind</div>
             <div class="weather-detail-value">${this.formatWindSpeed(current.wind_speed_10m)}</div>
           </div>
           <div class="weather-detail">
-            <div class="weather-detail-icon">🌧️</div>
-            <div class="weather-detail-label">Rain</div>
-            <div class="weather-detail-value">${current.precipitation || 0}mm</div>
+            <div class="weather-detail-icon" aria-hidden="true">☀️</div>
+            <div class="weather-detail-label">UV Index</div>
+            <div class="weather-detail-value">${current.uv_index || 0}</div>
           </div>
         </div>
 
-        <div class="weather-forecast">
-          <div class="forecast-title">3-Day Forecast</div>
-          <div class="forecast-days">
-            ${this.generateForecast(daily)}
+        ${this.options.showHourly ? this.generateHourlyForecast(hourly) : ''}
+
+        <div class="weather-forecast" role="group" aria-label="7-day forecast">
+          <div class="forecast-header">
+            <div class="forecast-title">7-Day Forecast</div>
+            <div class="forecast-controls">
+              <button class="forecast-nav prev" onclick="weatherWidget.scrollForecast(-1)" aria-label="Previous forecast days">‹</button>
+              <button class="forecast-nav next" onclick="weatherWidget.scrollForecast(1)" aria-label="Next forecast days">›</button>
+            </div>
+          </div>
+          <div class="forecast-container">
+            <div class="forecast-days" id="forecast-scroll">
+              ${this.generateExtendedForecast(daily)}
+            </div>
           </div>
         </div>
         
-        <div class="weather-controls">
-          <button class="temp-toggle" onclick="weatherWidget.toggleUnits()">
+        <div class="weather-controls" role="group" aria-label="Weather settings">
+          <button class="temp-toggle" onclick="weatherWidget.toggleUnits()" aria-label="Toggle temperature units">
             Switch to ${this.options.units === 'metric' ? '°F' : '°C'}
           </button>
+          <button class="settings-toggle" onclick="weatherWidget.toggleSettings()" aria-label="Open settings">
+            ⚙️ Settings
+          </button>
+        </div>
+
+        <div class="weather-settings" id="weather-settings" style="display: none;">
+          <div class="settings-header">Settings</div>
+          <div class="setting-item">
+            <label for="forecast-days">Forecast Days:</label>
+            <select id="forecast-days" onchange="weatherWidget.updateForecastDays(this.value)">
+              <option value="3" ${this.options.forecastDays === 3 ? 'selected' : ''}>3 Days</option>
+              <option value="5" ${this.options.forecastDays === 5 ? 'selected' : ''}>5 Days</option>
+              <option value="7" ${this.options.forecastDays === 7 ? 'selected' : ''}>7 Days</option>
+            </select>
+          </div>
+          <div class="setting-item">
+            <label>
+              <input type="checkbox" ${this.options.showHourly ? 'checked' : ''} onchange="weatherWidget.toggleHourly(this.checked)">
+              Show Hourly Forecast
+            </label>
+          </div>
         </div>
       </div>
     `;
@@ -181,6 +280,9 @@ class WeatherWidget {
     
     // Store reference for global access
     window.weatherWidget = this;
+    
+    // Initialize forecast scroll position
+    this.forecastScrollPosition = 0;
   }
 
   getWeatherIcon(code) {
@@ -295,31 +397,163 @@ class WeatherWidget {
     return forecastHTML;
   }
 
-  toggleUnits() {
-    this.options.units = this.options.units === 'metric' ? 'imperial' : 'metric';
-    this.fetchWeather(); // Refresh display with new units
+  generateExtendedForecast(daily) {
+    const days = ['Today', 'Tomorrow', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    const today = new Date();
+    let forecastHTML = '';
+    
+    for (let i = 0; i < this.options.forecastDays; i++) {
+      const date = new Date(today);
+      date.setDate(today.getDate() + i);
+      
+      const dayName = i < 2 ? days[i] : days[date.getDay()];
+      const maxTemp = this.formatTemperature(daily.temperature_2m_max[i]);
+      const minTemp = this.formatTemperature(daily.temperature_2m_min[i]);
+      const icon = this.getWeatherIcon(daily.weather_code[i]);
+      const precipitation = daily.precipitation_sum[i] || 0;
+      const uvIndex = daily.uv_index_max[i] || 0;
+      const windSpeed = this.formatWindSpeed(daily.wind_speed_10m_max[i] || 0);
+      
+      forecastHTML += `
+        <div class="forecast-day" role="group" aria-label="${dayName} forecast">
+          <div class="forecast-day-name">${dayName}</div>
+          <div class="forecast-date">${date.getDate()}/${date.getMonth() + 1}</div>
+          <div class="forecast-icon" role="img" aria-label="${this.getWeatherDescription(daily.weather_code[i])}">${icon}</div>
+          <div class="forecast-temps">
+            <span class="forecast-high" aria-label="High temperature">${maxTemp}</span>
+            <span class="forecast-low" aria-label="Low temperature">${minTemp}</span>
+          </div>
+          <div class="forecast-details">
+            ${precipitation > 0 ? `<div class="forecast-rain" title="Precipitation">🌧️ ${precipitation}mm</div>` : ''}
+            ${uvIndex > 5 ? `<div class="forecast-uv" title="UV Index">☀️ ${uvIndex}</div>` : ''}
+            <div class="forecast-wind" title="Wind speed">💨 ${windSpeed}</div>
+          </div>
+        </div>
+      `;
+    }
+    
+    return forecastHTML;
   }
 
-  showError(message) {
-    this.container.innerHTML = `
-      <div class="weather-error show">
-        <div class="error-icon">⚠️</div>
-        <div class="error-message">${message}</div>
-        <button class="retry-button" onclick="weatherWidget.init()">Try Again</button>
+  generateHourlyForecast(hourly) {
+    if (!hourly) return '';
+    
+    const now = new Date();
+    let hourlyHTML = `
+      <div class="hourly-forecast" role="group" aria-label="24-hour forecast">
+        <div class="hourly-title">Next 24 Hours</div>
+        <div class="hourly-container">
+          <div class="hourly-scroll" id="hourly-scroll">
+    `;
+    
+    for (let i = 0; i < 24; i++) {
+      const hour = new Date(now.getTime() + (i * 60 * 60 * 1000));
+      const temp = this.formatTemperature(hourly.temperature_2m[i]);
+      const icon = this.getWeatherIcon(hourly.weather_code[i]);
+      const precipitation = hourly.precipitation_probability[i] || 0;
+      
+      hourlyHTML += `
+        <div class="hourly-item">
+          <div class="hourly-time">${hour.getHours()}:00</div>
+          <div class="hourly-icon">${icon}</div>
+          <div class="hourly-temp">${temp}</div>
+          ${precipitation > 0 ? `<div class="hourly-rain">${precipitation}%</div>` : '<div class="hourly-rain"></div>'}
+        </div>
+      `;
+    }
+    
+    hourlyHTML += `
+          </div>
+        </div>
+      </div>
+    `;
+    
+    return hourlyHTML;
+  }
+
+  checkWeatherAlerts(current, daily) {
+    const alerts = [];
+    
+    // High UV Alert
+    if (current.uv_index && current.uv_index > 7) {
+      alerts.push({
+        type: 'uv',
+        message: 'High UV Index - Sun protection recommended',
+        icon: '☀️'
+      });
+    }
+    
+    // High Wind Alert
+    if (current.wind_speed_10m > 40) {
+      alerts.push({
+        type: 'wind',
+        message: 'High wind speeds - Exercise caution outdoors',
+        icon: '💨'
+      });
+    }
+    
+    // Heavy Rain Alert
+    if (current.precipitation > 10) {
+      alerts.push({
+        type: 'rain',
+        message: 'Heavy rainfall - Consider indoor activities',
+        icon: '🌧️'
+      });
+    }
+    
+    if (alerts.length === 0) return '';
+    
+    return `
+      <div class="weather-alerts" role="alert" aria-live="polite">
+        ${alerts.map(alert => `
+          <div class="weather-alert ${alert.type}">
+            <span class="alert-icon">${alert.icon}</span>
+            <span class="alert-message">${alert.message}</span>
+          </div>
+        `).join('')}
       </div>
     `;
   }
 
-  setupAutoRefresh() {
-    // Clear any existing interval
-    if (this.refreshInterval) {
-      clearInterval(this.refreshInterval);
+  scrollForecast(direction) {
+    const container = document.getElementById('forecast-scroll');
+    if (container) {
+      const scrollAmount = 200;
+      this.forecastScrollPosition += direction * scrollAmount;
+      this.forecastScrollPosition = Math.max(0, this.forecastScrollPosition);
+      container.scrollTo({
+        left: this.forecastScrollPosition,
+        behavior: 'smooth'
+      });
     }
-    
-    this.refreshInterval = setInterval(() => {
-      console.log('Auto-refreshing weather data...');
-      this.fetchWeather();
-    }, this.options.refreshInterval);
+  }
+
+  toggleSettings() {
+    const settings = document.getElementById('weather-settings');
+    if (settings) {
+      settings.style.display = settings.style.display === 'none' ? 'block' : 'none';
+    }
+  }
+
+  updateForecastDays(days) {
+    this.options.forecastDays = parseInt(days);
+    this.fetchWeatherData();
+  }
+
+  toggleHourly(show) {
+    this.options.showHourly = show;
+    this.fetchWeatherData();
+  }
+
+  setupAccessibility() {
+    // Add keyboard navigation
+    this.container.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowLeft') {
+        this.scrollForecast(-1);
+      } else if (e.key === 'ArrowRight') {
+        this.scrollForecast(1);
+      }
+    });
   }
 
   // Clean up method
